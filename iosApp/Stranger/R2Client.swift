@@ -8,6 +8,19 @@ final class R2Client: NSObject, URLSessionDownloadDelegate {
     private var continuations: [Int: CheckedContinuation<URL, Error>] = [:]
     private let lock = NSLock()
 
+    private static let awsUnreservedCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
+    private static func awsURIEncode(_ path: String) -> String {
+        return path
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map { segment in
+                String(segment).addingPercentEncoding(withAllowedCharacters: awsUnreservedCharacters) ?? String(segment)
+            }
+            .joined(separator: "/")
+    }
+
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
@@ -25,17 +38,16 @@ final class R2Client: NSObject, URLSessionDownloadDelegate {
         let accessKey = SecurityConfig.r2AccessKeyId
         let secretKey = SecurityConfig.r2SecretAccessKey
 
-        let encodedKey = key
-            .split(separator: "/")
-            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-            .joined(separator: "/")
+        let cleanKey = key.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let canonicalURI = "/" + Self.awsURIEncode("\(bucket)/\(cleanKey)")
 
-        guard let url = URL(string: "\(endpoint)/\(bucket)/\(encodedKey)") else {
+        guard let url = URL(string: "\(endpoint)\(canonicalURI)") else {
             throw URLError(.badURL)
         }
 
         let request = try signRequest(
             url: url,
+            canonicalURI: canonicalURI,
             method: "GET",
             accessKey: accessKey,
             secretKey: secretKey,
@@ -77,6 +89,7 @@ final class R2Client: NSObject, URLSessionDownloadDelegate {
 
     private func signRequest(
         url: URL,
+        canonicalURI: String,
         method: String,
         accessKey: String,
         secretKey: String,
@@ -106,7 +119,6 @@ final class R2Client: NSObject, URLSessionDownloadDelegate {
         request.setValue(amzDate, forHTTPHeaderField: "x-amz-date")
         request.setValue(payloadHash, forHTTPHeaderField: "x-amz-content-sha256")
 
-        let canonicalURI = url.path.isEmpty ? "/" : url.path
         let canonicalQuery = url.query ?? ""
         let canonicalHeaders = "host:\(host)\nx-amz-content-sha256:\(payloadHash)\nx-amz-date:\(amzDate)\n"
         let signedHeaders = "host;x-amz-content-sha256;x-amz-date"
