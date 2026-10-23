@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "990740693115",
+    "project_id": "stranger-2002",
+    "storage_bucket": "stranger-2002.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:990740693115:android:674c00bec362ff289362de",
+        "android_client_info": {
+          "package_name": "com.tk.stranger"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD_-A581HQzCb9MlQ3_Fp_MomgPrIgg8Hk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
