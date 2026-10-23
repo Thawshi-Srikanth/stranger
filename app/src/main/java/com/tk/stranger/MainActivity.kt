@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
         val dbManager = DatabaseManager(this)
         val mediaManager = MediaManager(this)
         val passcodeManager = PasscodeManager(this)
+        val updateManager = UpdateManager(this)
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
         var showOnboarding by mutableStateOf(!prefs.getBoolean("onboarding_finished", false))
         
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
             val setupState by dbManager.setupState.collectAsState(initial = SetupState.Idle)
             var isUnlocked by remember { mutableStateOf(false) }
             var isChangingPasscode by remember { mutableStateOf(false) }
+            var pendingUpdate by remember { mutableStateOf<AppVersionInfo?>(null) }
             val lifecycleOwner = LocalLifecycleOwner.current
 
             // Auto-lock the app whenever it moves to the background
@@ -85,10 +87,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Only download and decrypt the archive once unlocked with the valid PIN
+            // Only download and decrypt the archive + check for updates once unlocked with the valid PIN
             LaunchedEffect(isUnlocked) {
                 if (isUnlocked) {
                     dbManager.setupDatabase()
+                    val update = updateManager.checkForUpdate()
+                    if (update != null) {
+                        pendingUpdate = update
+                    }
                 }
             }
 
@@ -303,6 +309,8 @@ class MainActivity : ComponentActivity() {
                                         onClose = { isProfileActive = false },
                                         dbManager = dbManager,
                                         mediaManager = mediaManager,
+                                        updateManager = updateManager,
+                                        onUpdateAvailable = { pendingUpdate = it },
                                         onJumpToMessage = { jumpToMessage(it) },
                                         onMediaClick = { index: Int ->
                                             initialMediaIndex = index
@@ -329,6 +337,14 @@ class MainActivity : ComponentActivity() {
                                         exoPlayer = currentPlayer
                                     )
                                 }
+                            }
+
+                            if (pendingUpdate != null) {
+                                UpdateAvailableDialog(
+                                    updateInfo = pendingUpdate!!,
+                                    updateManager = updateManager,
+                                    onDismiss = { pendingUpdate = null }
+                                )
                             }
                         }
                     }

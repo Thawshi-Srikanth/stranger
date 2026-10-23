@@ -52,6 +52,22 @@ public class EncryptSecrets {
         return sb.toString();
     }
 
+    static String formatSwiftByteArray(String marker, String name, byte[] data) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("    // BEGIN_").append(marker).append("\n");
+        sb.append("    private static let ").append(name).append(": [UInt8] = [\n        ");
+        for (int i = 0; i < data.length; i++) {
+            sb.append(String.format("0x%02X", data[i] & 0xFF));
+            if (i < data.length - 1) {
+                sb.append(", ");
+                if ((i + 1) % 8 == 0) sb.append("\n        ");
+            }
+        }
+        sb.append("\n    ]\n");
+        sb.append("    // END_").append(marker);
+        return sb.toString();
+    }
+
     static String replaceBlock(String content, String marker, String replacement) {
         String startTag = "    // BEGIN_" + marker;
         String endTag = "    // END_" + marker;
@@ -87,21 +103,31 @@ public class EncryptSecrets {
         }
 
         byte[] key = deriveKey(pin);
-        String endpointArr = formatKotlinByteArray("ENDPOINT_ENC", "endpointEnc", encrypt(key, (byte)0x11, endpoint));
-        String bucketArr = formatKotlinByteArray("BUCKET_ENC", "bucketEnc", encrypt(key, (byte)0x22, bucket));
-        String accessArr = formatKotlinByteArray("ACCESS_ENC", "accessKeyEnc", encrypt(key, (byte)0x33, accessKey));
-        String secretArr = formatKotlinByteArray("SECRET_ENC", "secretKeyEnc", encrypt(key, (byte)0x44, secretKey));
+        byte[] encEndpoint = encrypt(key, (byte)0x11, endpoint);
+        byte[] encBucket = encrypt(key, (byte)0x22, bucket);
+        byte[] encAccess = encrypt(key, (byte)0x33, accessKey);
+        byte[] encSecret = encrypt(key, (byte)0x44, secretKey);
 
-        Path targetPath = Path.of("app/src/main/java/com/tk/stranger/SecurityConfig.kt");
-        String content = Files.readString(targetPath, StandardCharsets.UTF_8);
+        Path ktPath = Path.of("app/src/main/java/com/tk/stranger/SecurityConfig.kt");
+        if (Files.exists(ktPath)) {
+            String ktContent = Files.readString(ktPath, StandardCharsets.UTF_8);
+            ktContent = replaceBlock(ktContent, "ENDPOINT_ENC", formatKotlinByteArray("ENDPOINT_ENC", "endpointEnc", encEndpoint));
+            ktContent = replaceBlock(ktContent, "BUCKET_ENC", formatKotlinByteArray("BUCKET_ENC", "bucketEnc", encBucket));
+            ktContent = replaceBlock(ktContent, "ACCESS_ENC", formatKotlinByteArray("ACCESS_ENC", "accessKeyEnc", encAccess));
+            ktContent = replaceBlock(ktContent, "SECRET_ENC", formatKotlinByteArray("SECRET_ENC", "secretKeyEnc", encSecret));
+            Files.writeString(ktPath, ktContent, StandardCharsets.UTF_8);
+        }
 
-        content = replaceBlock(content, "ENDPOINT_ENC", endpointArr);
-        content = replaceBlock(content, "BUCKET_ENC", bucketArr);
-        content = replaceBlock(content, "ACCESS_ENC", accessArr);
-        content = replaceBlock(content, "SECRET_ENC", secretArr);
+        Path swiftPath = Path.of("iosApp/Stranger/SecurityConfig.swift");
+        if (Files.exists(swiftPath)) {
+            String swiftContent = Files.readString(swiftPath, StandardCharsets.UTF_8);
+            swiftContent = replaceBlock(swiftContent, "ENDPOINT_ENC", formatSwiftByteArray("ENDPOINT_ENC", "endpointEnc", encEndpoint));
+            swiftContent = replaceBlock(swiftContent, "BUCKET_ENC", formatSwiftByteArray("BUCKET_ENC", "bucketEnc", encBucket));
+            swiftContent = replaceBlock(swiftContent, "ACCESS_ENC", formatSwiftByteArray("ACCESS_ENC", "accessKeyEnc", encAccess));
+            swiftContent = replaceBlock(swiftContent, "SECRET_ENC", formatSwiftByteArray("SECRET_ENC", "secretKeyEnc", encSecret));
+            Files.writeString(swiftPath, swiftContent, StandardCharsets.UTF_8);
+        }
 
-        Files.writeString(targetPath, content, StandardCharsets.UTF_8);
-
-        System.out.println("SUCCESS! Encrypted R2 keys into SecurityConfig.kt (and kept your copy in local.properties).");
+        System.out.println("SUCCESS! Encrypted R2 keys into both Android (SecurityConfig.kt) and iOS (SecurityConfig.swift).");
     }
 }

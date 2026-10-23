@@ -50,9 +50,11 @@ import androidx.paging.compose.itemKey
 import androidx.paging.LoadState
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.tk.stranger.AppVersionInfo
 import com.tk.stranger.ChatMessage
 import com.tk.stranger.DatabaseManager
 import com.tk.stranger.MediaManager
+import com.tk.stranger.UpdateManager
 import com.tk.stranger.ui.components.ContactBubble
 import com.tk.stranger.ui.components.LocationBubble
 import com.tk.stranger.ui.components.MiniPlayer
@@ -68,6 +70,8 @@ fun ProfileScreen(
     onClose: () -> Unit,
     dbManager: DatabaseManager,
     mediaManager: MediaManager,
+    updateManager: UpdateManager,
+    onUpdateAvailable: (AppVersionInfo) -> Unit,
     onJumpToMessage: (Int) -> Unit,
     onMediaClick: (Int) -> Unit,
     onChangePasscode: () -> Unit,
@@ -79,6 +83,7 @@ fun ProfileScreen(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
+    var isCheckingUpdate by remember { mutableStateOf(false) }
     
     val density = LocalDensity.current
     val topBarHeightPx = with(density) { 64.dp.toPx() }
@@ -184,14 +189,37 @@ fun ProfileScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 16.dp)
+                                .padding(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             ProfileActionButton(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.weight(1f),
                                 icon = TablerIcons.Lock,
                                 label = "Change Passcode",
                                 shape = CircleShape,
                                 onClick = onChangePasscode
+                            )
+                            ProfileActionButton(
+                                modifier = Modifier.weight(1f),
+                                icon = TablerIcons.Refresh,
+                                label = if (isCheckingUpdate) "Checking…" else "Check Updates",
+                                shape = CircleShape,
+                                onClick = {
+                                    if (!isCheckingUpdate) {
+                                        scope.launch {
+                                            isCheckingUpdate = true
+                                            val update = updateManager.checkForUpdate()
+                                            isCheckingUpdate = false
+                                            if (update != null) {
+                                                onUpdateAvailable(update)
+                                            } else {
+                                                snackbarHostState.showSnackbar(
+                                                    "You're on the latest version (v${updateManager.getCurrentVersionName()})"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             )
                         }
 

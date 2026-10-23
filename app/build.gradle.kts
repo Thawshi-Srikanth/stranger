@@ -16,12 +16,15 @@ android {
         }
     }
 
+    val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 1
+    val propVersionName = (project.findProperty("versionName") as? String) ?: "1.0.$propVersionCode"
+
     defaultConfig {
         applicationId = "com.tk.stranger"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = propVersionCode
+        versionName = propVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -34,10 +37,17 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = keystoreProperties.getProperty("signing.store.file")?.let { file(it) }
+            val storePath = keystoreProperties.getProperty("signing.store.file")
+                ?: System.getenv("SIGNING_STORE_FILE")
+            if (!storePath.isNullOrBlank()) {
+                storeFile = file(storePath)
+            }
             storePassword = keystoreProperties.getProperty("signing.store.password")
+                ?: System.getenv("SIGNING_STORE_PASSWORD")
             keyAlias = keystoreProperties.getProperty("signing.key.alias")
+                ?: System.getenv("SIGNING_KEY_ALIAS")
             keyPassword = keystoreProperties.getProperty("signing.key.password")
+                ?: System.getenv("SIGNING_KEY_PASSWORD")
         }
     }
 
@@ -54,7 +64,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (signingConfigs.getByName("release").storeFile?.exists() == true) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
     compileOptions {
