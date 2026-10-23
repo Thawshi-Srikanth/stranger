@@ -32,7 +32,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
-	</dict>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
