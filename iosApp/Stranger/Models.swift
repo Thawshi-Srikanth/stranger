@@ -25,6 +25,8 @@ struct ChatMessage: Identifiable, Equatable {
     let content: String
     let mediaType: String?
     let isSentByMe: Bool
+    var replyToMessageId: Int64?
+    var parentLocalId: Int?
     var replyToText: String?
     var replyToSender: String?
     let parsedContent: MessageContent
@@ -38,6 +40,8 @@ struct ChatMessage: Identifiable, Equatable {
         content: String,
         mediaType: String? = nil,
         isSentByMe: Bool,
+        replyToMessageId: Int64? = nil,
+        parentLocalId: Int? = nil,
         replyToText: String? = nil,
         replyToSender: String? = nil
     ) {
@@ -48,6 +52,8 @@ struct ChatMessage: Identifiable, Equatable {
         self.content = content
         self.mediaType = mediaType
         self.isSentByMe = isSentByMe
+        self.replyToMessageId = replyToMessageId
+        self.parentLocalId = parentLocalId
         self.replyToText = replyToText
         self.replyToSender = replyToSender
 

@@ -91,7 +91,7 @@ final class DatabaseManager: ObservableObject {
 
         let sql = """
         SELECT m.id, m.message_id, m.date, m.from_id, m.content, m.media_type,
-               p.from_id as p_from, p.content as p_content
+               m.reply_to_message_id, p.id as p_id, p.from_id as p_from, p.content as p_content
         FROM messages m
         LEFT JOIN messages p ON m.reply_to_message_id = p.message_id
         WHERE m.from_id IN (?, ?)
@@ -200,6 +200,52 @@ final class DatabaseManager: ObservableObject {
         return offset
     }
 
+    func getDateRange() -> (minDate: Date, maxDate: Date)? {
+        openDatabaseIfNeeded()
+        guard let db = dbPointer else { return nil }
+        let sql = "SELECT MIN(date), MAX(date) FROM messages"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW,
+              let minRaw = columnString(stmt, 0),
+              let maxRaw = columnString(stmt, 1) else {
+            return nil
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let minNorm = String(minRaw.replacingOccurrences(of: "T", with: " ").prefix(19))
+        let maxNorm = String(maxRaw.replacingOccurrences(of: "T", with: " ").prefix(19))
+        guard let minD = f.date(from: minNorm), let maxD = f.date(from: maxNorm) else { return nil }
+        return (minD, maxD)
+    }
+
+    func getOffsetByDate(_ targetDate: Date) -> Int {
+        openDatabaseIfNeeded()
+        guard let db = dbPointer else { return 0 }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let dateStr = f.string(from: targetDate)
+
+        let sql = "SELECT COUNT(*) FROM messages WHERE from_id IN (?, ?) AND date > ?"
+        var stmt: OpaquePointer?
+        var offset = 0
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (incomingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (outgoingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 3, (dateStr as NSString).utf8String, -1, nil)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                offset = Int(sqlite3_column_int(stmt, 0))
+            }
+        }
+        sqlite3_finalize(stmt)
+        return offset
+    }
+
     func localMediaURL(for key: String) -> URL {
         let safeName = key.replacingOccurrences(of: "/", with: "_")
         return mediaDirectory.appendingPathComponent(safeName)
@@ -211,6 +257,12 @@ final class DatabaseManager: ObservableObject {
               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? Int64 else { return false }
         return size > 0
+    }
+
+    func readTgsAsJson(url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url),
+              let decompressed = try? Self.gunzip(data: data) else { return nil }
+        return String(data: decompressed, encoding: .utf8)
     }
 
     func downloadMedia(key: String, onProgress: ((Int) -> Void)? = nil) async -> URL? {
@@ -240,8 +292,10 @@ final class DatabaseManager: ObservableObject {
         let fromId = columnString(stmt, 3) ?? ""
         let content = columnString(stmt, 4) ?? "{}"
         let mediaType = columnString(stmt, 5)
-        let pFromId = columnString(stmt, 6)
-        let pContent = columnString(stmt, 7)
+        let replyToMsgId: Int64? = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 6)
+        let parentLocalId: Int? = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 7))
+        let pFromId = columnString(stmt, 8)
+        let pContent = columnString(stmt, 9)
 
         var replySender: String? = nil
         var replyText: String? = nil
@@ -255,10 +309,15 @@ final class DatabaseManager: ObservableObject {
                     content: pRaw,
                     isSentByMe: pFrom == outgoingId
                 )
-                replyText = dummy.textPlain
-                    ?? dummy.parsedContent.title
-                    ?? dummy.parsedContent.media_type?.uppercased()
-                    ?? "Media"
+                if let tp = dummy.textPlain, !tp.isEmpty {
+                    replyText = tp
+                } else if let emoji = dummy.parsedContent.sticker_emoji, !emoji.isEmpty {
+                    replyText = "Sticker \(emoji)"
+                } else {
+                    replyText = dummy.parsedContent.title
+                        ?? dummy.parsedContent.media_type?.uppercased()
+                        ?? "Media"
+                }
             }
         }
 
@@ -270,6 +329,8 @@ final class DatabaseManager: ObservableObject {
             content: content,
             mediaType: mediaType,
             isSentByMe: fromId == outgoingId,
+            replyToMessageId: replyToMsgId,
+            parentLocalId: parentLocalId,
             replyToText: replyText,
             replyToSender: replySender
         )
