@@ -9,18 +9,37 @@ struct ChatMessage: Identifiable, Equatable {
     let textPlain: String?
     var replyToText: String?
     var replyToSender: String?
+    let parsedContent: MessageContent
+
+    init(
+        id: Int,
+        sender: String?,
+        timestamp: Int64,
+        type: String?,
+        content: String,
+        textPlain: String?,
+        replyToText: String? = nil,
+        replyToSender: String? = nil
+    ) {
+        self.id = id
+        self.sender = sender
+        self.timestamp = timestamp
+        self.type = type
+        self.content = content
+        self.textPlain = textPlain
+        self.replyToText = replyToText
+        self.replyToSender = replyToSender
+        if let data = content.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(MessageContent.self, from: data) {
+            self.parsedContent = decoded
+        } else {
+            self.parsedContent = MessageContent()
+        }
+    }
 
     var isSentByMe: Bool {
         sender != "Stranger"
     }
-
-    lazy var parsedContent: MessageContent = {
-        guard let data = content.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(MessageContent.self, from: data) else {
-            return MessageContent()
-        }
-        return decoded
-    }()
 
     var formattedTime: String {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
