@@ -67,7 +67,7 @@ jobs:
           path: Stranger.apk
 
   build-ios:
-    name: Build iOS IPA
+    name: Build iOS IPA & Simulator App
     runs-on: macos-15
     needs: build-android
     steps:
@@ -80,10 +80,12 @@ jobs:
             brew install xcodegen
           fi
 
-      - name: Generate Xcode Project & Build Unsigned IPA
+      - name: Generate Xcode Project & Build Unsigned IPA + Simulator App
         working-directory: iosApp
         run: |
           xcodegen generate
+
+          # 1. Build for physical iOS devices (.ipa)
           xcodebuild clean build \
             -project Stranger.xcodeproj \
             -scheme Stranger \
@@ -100,11 +102,30 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Stranger.app Payload/
           zip -r ../Stranger.ipa Payload
 
-      - name: Upload iOS IPA Artifact
+          # 2. Build for iOS Simulator (.app.zip for Appetize.io)
+          xcodebuild build \
+            -project Stranger.xcodeproj \
+            -scheme Stranger \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -derivedDataPath build-sim \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CURRENT_PROJECT_VERSION="${{ needs.build-android.outputs.version_code }}" \
+            MARKETING_VERSION="${{ needs.build-android.outputs.version_name }}" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+          (cd build-sim/Build/Products/Release-iphonesimulator && zip -r ../../../../../Stranger-Simulator.app.zip Stranger.app)
+
+      - name: Upload iOS Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Stranger-ios
-          path: Stranger.ipa
+          path: |
+            Stranger.ipa
+            Stranger-Simulator.app.zip
 
   publish-release:
     name: Publish GitHub Release & Auto-Update Feeds
@@ -179,11 +200,13 @@ jobs:
             ### Automated Android & iOS Release (v${{ needs.build-android.outputs.version_name }})
             - **Android**: Download `Stranger.apk` (or use in-app **Update Now** / **Profile → Check Updates**).
             - **iOS (SideStore / AltStore Auto-Update)**: Add `https://github.com/${{ github.repository }}/releases/latest/download/altstore-source.json` to SideStore/AltStore Sources, or tap **Check Updates** inside the iOS app.
+            - **iOS Simulator (Appetize.io)**: Download `Stranger-Simulator.app.zip` and upload it directly to [Appetize.io](https://appetize.io).
           draft: false
           prerelease: false
           make_latest: true
           files: |
             Stranger.apk
             Stranger.ipa
+            Stranger-Simulator.app.zip
             version.json
             altstore-source.json
