@@ -17,6 +17,8 @@ final class DatabaseManager: ObservableObject {
 
     private let dbName = "chat.db"
     private let r2ObjectKey = "messages/chat.db.gz.enc"
+    private let outgoingId = "user1110791963"
+    private let incomingId = "user1159974332"
     private var dbPointer: OpaquePointer?
 
     private var dbURL: URL {
@@ -87,78 +89,48 @@ final class DatabaseManager: ObservableObject {
         openDatabaseIfNeeded()
         guard let db = dbPointer else { return [] }
 
-        let sql = "SELECT id, sender, timestamp, type, content, text_plain FROM messages ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?"
+        let sql = """
+        SELECT m.id, m.message_id, m.date, m.from_id, m.content, m.media_type,
+               p.from_id as p_from, p.content as p_content
+        FROM messages m
+        LEFT JOIN messages p ON m.reply_to_message_id = p.message_id
+        WHERE m.from_id IN (?, ?)
+        ORDER BY m.id DESC
+        LIMIT ? OFFSET ?
+        """
         var stmt: OpaquePointer?
         var messages: [ChatMessage] = []
-        var replyIds = Set<Int>()
 
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(limit))
-            sqlite3_bind_int(stmt, 2, Int32(offset))
+            sqlite3_bind_text(stmt, 1, (incomingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (outgoingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(stmt, 3, Int32(limit))
+            sqlite3_bind_int(stmt, 4, Int32(offset))
             while sqlite3_step(stmt) == SQLITE_ROW {
-                var msg = readMessage(stmt: stmt)
-                if let replyId = msg.parsedContent.reply_to_message_id {
-                    replyIds.insert(replyId)
-                }
-                messages.append(msg)
+                messages.append(readJoinedMessage(stmt: stmt))
             }
         }
         sqlite3_finalize(stmt)
-
-        if !replyIds.isEmpty {
-            let replyMap = fetchReplies(ids: Array(replyIds))
-            for i in messages.indices {
-                var m = messages[i]
-                if let rId = m.parsedContent.reply_to_message_id, let info = replyMap[rId] {
-                    m.replyToSender = info.sender
-                    m.replyToText = info.text
-                    messages[i] = m
-                }
-            }
-        }
         return messages
-    }
-
-    private func fetchReplies(ids: [Int]) -> [Int: (sender: String, text: String)] {
-        guard let db = dbPointer, !ids.isEmpty else { return [:] }
-        let placeholders = ids.map { String($0) }.joined(separator: ",")
-        let sql = "SELECT id, sender, text_plain, content FROM messages WHERE id IN (\(placeholders))"
-        var stmt: OpaquePointer?
-        var map: [Int: (String, String)] = [:]
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let id = Int(sqlite3_column_int(stmt, 0))
-                let sender = columnString(stmt, 1) ?? "Unknown"
-                let textPlain = columnString(stmt, 2)
-                let content = columnString(stmt, 3) ?? "{}"
-                let displayText: String
-                if let tp = textPlain, !tp.isEmpty {
-                    displayText = tp
-                } else if content.contains("\"photo\"") {
-                    displayText = "Photo"
-                } else if content.contains("\"video\"") {
-                    displayText = "Video"
-                } else if content.contains("\"voice_message\"") {
-                    displayText = "Voice message"
-                } else {
-                    displayText = "Media"
-                }
-                map[id] = (sender, displayText)
-            }
-        }
-        sqlite3_finalize(stmt)
-        return map
     }
 
     func searchMessages(query: String) -> [ChatMessage] {
         openDatabaseIfNeeded()
         guard let db = dbPointer, !query.isEmpty else { return [] }
-        let sql = "SELECT id, sender, timestamp, type, content, text_plain FROM messages WHERE text_plain LIKE ? ORDER BY timestamp DESC LIMIT 100"
+        let sql = """
+        SELECT id, message_id, date, from_id, content, media_type
+        FROM messages
+        WHERE from_id IN (?, ?) AND content LIKE ?
+        ORDER BY id DESC
+        LIMIT 100
+        """
         var stmt: OpaquePointer?
         var results: [ChatMessage] = []
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             let pattern = "%\(query)%"
-            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 1, (incomingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (outgoingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 3, (pattern as NSString).utf8String, -1, nil)
             while sqlite3_step(stmt) == SQLITE_ROW {
                 results.append(readMessage(stmt: stmt))
             }
@@ -170,30 +142,38 @@ final class DatabaseManager: ObservableObject {
     func getMediaMessages(category: String, limit: Int = 200, offset: Int = 0) -> [ChatMessage] {
         openDatabaseIfNeeded()
         guard let db = dbPointer else { return [] }
-        let filter: String
+        let typeFilter: String
         switch category {
         case "Media":
-            filter = "(content LIKE '%\"photo\":%' OR content LIKE '%\"media_type\":\"video%' OR content LIKE '%\"media_type\": \"video%')"
+            typeFilter = "media_type IN ('photo', 'video', 'rounded_video', 'photos', 'videos')"
         case "Files":
-            filter = "(content LIKE '%\"file\":%' AND content NOT LIKE '%\"media_type\":%')"
+            typeFilter = "media_type IN ('file', 'document', 'files')"
         case "Music":
-            filter = "(content LIKE '%\"media_type\":\"audio%' OR content LIKE '%\"media_type\": \"audio%')"
+            typeFilter = "media_type IN ('audio', 'music')"
         case "Voice":
-            filter = "(content LIKE '%\"media_type\":\"voice_message%' OR content LIKE '%\"media_type\": \"voice_message%')"
+            typeFilter = "media_type IN ('voice_message', 'voice')"
         case "Location":
-            filter = "content LIKE '%\"location_information\":%'"
+            typeFilter = "media_type IN ('location', 'venue')"
         case "Contact":
-            filter = "content LIKE '%\"contact_information\":%'"
+            typeFilter = "media_type IN ('contact', 'phone_number')"
         default:
-            filter = "1=1"
+            typeFilter = "media_type IS NOT NULL"
         }
 
-        let sql = "SELECT id, sender, timestamp, type, content, text_plain FROM messages WHERE \(filter) ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?"
+        let sql = """
+        SELECT id, message_id, date, from_id, content, media_type
+        FROM messages
+        WHERE from_id IN (?, ?) AND \(typeFilter)
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+        """
         var stmt: OpaquePointer?
         var list: [ChatMessage] = []
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(limit))
-            sqlite3_bind_int(stmt, 2, Int32(offset))
+            sqlite3_bind_text(stmt, 1, (incomingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (outgoingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(stmt, 3, Int32(limit))
+            sqlite3_bind_int(stmt, 4, Int32(offset))
             while sqlite3_step(stmt) == SQLITE_ROW {
                 list.append(readMessage(stmt: stmt))
             }
@@ -205,15 +185,12 @@ final class DatabaseManager: ObservableObject {
     func getMessageOffset(messageId: Int) -> Int {
         openDatabaseIfNeeded()
         guard let db = dbPointer else { return 0 }
-        let sql = """
-        SELECT COUNT(*) FROM messages WHERE timestamp > (SELECT timestamp FROM messages WHERE id = ?)
-        OR (timestamp = (SELECT timestamp FROM messages WHERE id = ?) AND id > ?)
-        """
+        let sql = "SELECT COUNT(*) FROM messages WHERE from_id IN (?, ?) AND id > ?"
         var stmt: OpaquePointer?
         var offset = 0
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int(stmt, 1, Int32(messageId))
-            sqlite3_bind_int(stmt, 2, Int32(messageId))
+            sqlite3_bind_text(stmt, 1, (incomingId as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (outgoingId as NSString).utf8String, -1, nil)
             sqlite3_bind_int(stmt, 3, Int32(messageId))
             if sqlite3_step(stmt) == SQLITE_ROW {
                 offset = Int(sqlite3_column_int(stmt, 0))
@@ -223,24 +200,9 @@ final class DatabaseManager: ObservableObject {
         return offset
     }
 
-    func getOffsetByDate(targetTimestamp: Int64) -> Int {
-        openDatabaseIfNeeded()
-        guard let db = dbPointer else { return 0 }
-        let sql = "SELECT COUNT(*) FROM messages WHERE timestamp > ?"
-        var stmt: OpaquePointer?
-        var offset = 0
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_int64(stmt, 1, targetTimestamp)
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                offset = Int(sqlite3_column_int(stmt, 0))
-            }
-        }
-        sqlite3_finalize(stmt)
-        return offset
-    }
-
     func localMediaURL(for key: String) -> URL {
-        return mediaDirectory.appendingPathComponent(key)
+        let safeName = key.replacingOccurrences(of: "/", with: "_")
+        return mediaDirectory.appendingPathComponent(safeName)
     }
 
     func isMediaDownloaded(_ key: String) -> Bool {
@@ -256,27 +218,78 @@ final class DatabaseManager: ObservableObject {
             return localMediaURL(for: key)
         }
         let dest = localMediaURL(for: key)
+        let cleanKey = key.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let rootFiles: Set<String> = ["avatar.jpg", "chat-bg.png"]
+        let finalKey: String
+        if rootFiles.contains(cleanKey) || cleanKey.hasPrefix("messages/") {
+            finalKey = cleanKey
+        } else {
+            finalKey = "messages/\(cleanKey)"
+        }
         return try? await R2Client.shared.downloadObject(
-            key: key,
+            key: finalKey,
             destinationURL: dest,
             onProgress: onProgress
         )
     }
 
-    private func readMessage(stmt: OpaquePointer?) -> ChatMessage {
+    private func readJoinedMessage(stmt: OpaquePointer?) -> ChatMessage {
         let id = Int(sqlite3_column_int(stmt, 0))
-        let sender = columnString(stmt, 1)
-        let timestamp = sqlite3_column_int64(stmt, 2)
-        let type = columnString(stmt, 3)
+        let messageId = sqlite3_column_int64(stmt, 1)
+        let date = columnString(stmt, 2) ?? ""
+        let fromId = columnString(stmt, 3) ?? ""
         let content = columnString(stmt, 4) ?? "{}"
-        let textPlain = columnString(stmt, 5)
+        let mediaType = columnString(stmt, 5)
+        let pFromId = columnString(stmt, 6)
+        let pContent = columnString(stmt, 7)
+
+        var replySender: String? = nil
+        var replyText: String? = nil
+        if let pFrom = pFromId {
+            replySender = (pFrom == outgoingId) ? "You" : "Stranger"
+            if let pRaw = pContent {
+                let dummy = ChatMessage(
+                    id: 0,
+                    date: "",
+                    fromId: pFrom,
+                    content: pRaw,
+                    isSentByMe: pFrom == outgoingId
+                )
+                replyText = dummy.textPlain
+                    ?? dummy.parsedContent.title
+                    ?? dummy.parsedContent.media_type?.uppercased()
+                    ?? "Media"
+            }
+        }
+
         return ChatMessage(
             id: id,
-            sender: sender,
-            timestamp: timestamp,
-            type: type,
+            messageId: messageId,
+            date: date,
+            fromId: fromId,
             content: content,
-            textPlain: textPlain
+            mediaType: mediaType,
+            isSentByMe: fromId == outgoingId,
+            replyToText: replyText,
+            replyToSender: replySender
+        )
+    }
+
+    private func readMessage(stmt: OpaquePointer?) -> ChatMessage {
+        let id = Int(sqlite3_column_int(stmt, 0))
+        let messageId = sqlite3_column_int64(stmt, 1)
+        let date = columnString(stmt, 2) ?? ""
+        let fromId = columnString(stmt, 3) ?? ""
+        let content = columnString(stmt, 4) ?? "{}"
+        let mediaType = columnString(stmt, 5)
+        return ChatMessage(
+            id: id,
+            messageId: messageId,
+            date: date,
+            fromId: fromId,
+            content: content,
+            mediaType: mediaType,
+            isSentByMe: fromId == outgoingId
         )
     }
 

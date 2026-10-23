@@ -412,8 +412,7 @@ struct MessageBubbleView: View {
     @State private var progress = 0
 
     var body: some View {
-        var msg = message
-        let content = msg.parsedContent
+        let content = message.parsedContent
         HStack {
             if message.isSentByMe { Spacer(minLength: 50) }
 
@@ -434,11 +433,11 @@ struct MessageBubbleView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
 
-                if let mediaKey = content.photo ?? content.file {
+                if let mediaKey = content.photo ?? content.file ?? content.sticker {
                     MediaAttachmentView(
                         key: mediaKey,
                         title: content.title ?? content.file_name,
-                        mediaType: content.media_type,
+                        mediaType: message.mediaType ?? content.media_type,
                         fileSize: content.file_size ?? content.photo_file_size ?? 0,
                         dbManager: dbManager
                     )
@@ -578,7 +577,7 @@ struct SearchSheetView: View {
             List(results) { msg in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(msg.sender ?? "Unknown")
+                        Text(msg.sender)
                             .font(.subheadline.bold())
                             .foregroundColor(.white)
                         Spacer()
