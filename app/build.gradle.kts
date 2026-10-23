@@ -42,19 +42,25 @@ android {
             if (!storePath.isNullOrBlank()) {
                 storeFile = file(storePath)
             }
-            storePassword = keystoreProperties.getProperty("signing.store.password")
-                ?: System.getenv("SIGNING_STORE_PASSWORD")
-            keyAlias = keystoreProperties.getProperty("signing.key.alias")
-                ?: System.getenv("SIGNING_KEY_ALIAS")
-            keyPassword = keystoreProperties.getProperty("signing.key.password")
-                ?: System.getenv("SIGNING_KEY_PASSWORD")
+            storePassword = (keystoreProperties.getProperty("signing.store.password")
+                ?: System.getenv("SIGNING_STORE_PASSWORD"))?.takeIf { it.isNotBlank() }
+            keyAlias = (keystoreProperties.getProperty("signing.key.alias")
+                ?: System.getenv("SIGNING_KEY_ALIAS"))?.takeIf { it.isNotBlank() }
+            keyPassword = (keystoreProperties.getProperty("signing.key.password")
+                ?: System.getenv("SIGNING_KEY_PASSWORD"))?.takeIf { it.isNotBlank() }
         }
     }
 
+    val releaseSigning = signingConfigs.getByName("release")
+    val hasValidReleaseSigning = releaseSigning.storeFile?.exists() == true &&
+        !releaseSigning.storePassword.isNullOrBlank() &&
+        !releaseSigning.keyAlias.isNullOrBlank() &&
+        !releaseSigning.keyPassword.isNullOrBlank()
+
     buildTypes {
         debug {
-            if (signingConfigs.getByName("release").storeFile?.exists() == true) {
-                signingConfig = signingConfigs.getByName("release")
+            if (hasValidReleaseSigning) {
+                signingConfig = releaseSigning
             }
         }
         release {
@@ -64,8 +70,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = if (signingConfigs.getByName("release").storeFile?.exists() == true) {
-                signingConfigs.getByName("release")
+            signingConfig = if (hasValidReleaseSigning) {
+                releaseSigning
             } else {
                 signingConfigs.getByName("debug")
             }
