@@ -1,6 +1,8 @@
 package com.tk.stranger.ui.screens
 
 import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,12 +10,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -34,20 +35,19 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.paging.compose.LazyPagingItems
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.tk.stranger.ChatMessage
 import com.tk.stranger.MediaManager
-import android.widget.Toast
-import kotlinx.coroutines.withContext
 import compose.icons.TablerIcons
 import compose.icons.tablericons.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -60,6 +60,10 @@ fun MediaExplorer(
     mediaManager: MediaManager,
     exoPlayer: Player
 ) {
+    BackHandler {
+        onClose()
+    }
+
     val context = LocalContext.current
     val pagerState = rememberPagerState(
         initialPage = 0,
@@ -84,8 +88,8 @@ fun MediaExplorer(
     val thumbWidthPx = with(density) { 60.dp.toPx() }
     val centerOffset = ((screenWidthPx - thumbWidthPx) / 2).toInt()
 
-    LaunchedEffect(pagerState.currentPage) {
-        if (items.itemCount > 0) {
+    LaunchedEffect(pagerState.currentPage, items.itemCount) {
+        if (items.itemCount > 0 && pagerState.currentPage in 0 until items.itemCount) {
             thumbnailListState.animateScrollToItem(pagerState.currentPage, -centerOffset)
         }
     }
@@ -117,34 +121,37 @@ fun MediaExplorer(
         onDispose { exoPlayer.removeListener(listener) }
     }
 
-    LaunchedEffect(pagerState.currentPage) {
-        val currentMessage = items[pagerState.currentPage]
-        if (currentMessage != null &&
-            (currentMessage.parsedContent.media_type == "video" || currentMessage.parsedContent.media_type == "rounded_video")
-        ) {
-            val key = currentMessage.parsedContent.file
-            if (key != null && mediaManager.isFileDownloaded(key)) {
-                val file = mediaManager.getLocalFile(key)
-                val mediaItem = MediaItem.Builder()
-                    .setUri(Uri.fromFile(file))
-                    .setMediaId("explorer_${file.absolutePath}")
-                    .build()
-                exoPlayer.setMediaItem(mediaItem)
-                exoPlayer.prepare()
-                exoPlayer.play()
-                exoPlayer.repeatMode =
-                    if (currentMessage.parsedContent.media_type == "rounded_video")
-                        Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    LaunchedEffect(pagerState.currentPage, items.itemCount) {
+        val page = pagerState.currentPage
+        if (items.itemCount > 0 && page in 0 until items.itemCount) {
+            val currentMessage = items[page]
+            if (currentMessage != null &&
+                (currentMessage.parsedContent.media_type == "video" || currentMessage.parsedContent.media_type == "rounded_video")
+            ) {
+                val key = currentMessage.parsedContent.file
+                if (key != null && mediaManager.isFileDownloaded(key)) {
+                    val file = mediaManager.getLocalFile(key)
+                    val mediaItem = MediaItem.Builder()
+                        .setUri(Uri.fromFile(file))
+                        .setMediaId("explorer_${file.absolutePath}")
+                        .build()
+                    exoPlayer.setMediaItem(mediaItem)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                    exoPlayer.repeatMode =
+                        if (currentMessage.parsedContent.media_type == "rounded_video")
+                            Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                }
+                isUiVisible = false
+            } else {
+                // Only stop if we were playing a video from the explorer
+                if (exoPlayer.currentMediaItem?.mediaId?.startsWith("explorer_") == true) {
+                    exoPlayer.stop()
+                    exoPlayer.clearMediaItems()
+                }
+                isUiVisible = true
+                resetHideTimer()
             }
-            isUiVisible = false
-        } else {
-            // Only stop if we were playing a video from the explorer
-            if (exoPlayer.currentMediaItem?.mediaId?.startsWith("explorer_") == true) {
-                exoPlayer.stop()
-                exoPlayer.clearMediaItems()
-            }
-            isUiVisible = true
-            resetHideTimer()
         }
     }
 
@@ -170,7 +177,7 @@ fun MediaExplorer(
                 pageSpacing = 16.dp,
                 userScrollEnabled = !isFastForwarding && !isImageZoomed
             ) { page ->
-                val message = items[page]
+                val message = if (page in 0 until items.itemCount) items[page] else null
                 if (message != null) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         val key = message.parsedContent.file ?: message.parsedContent.photo
@@ -218,8 +225,8 @@ fun MediaExplorer(
                                 
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     AndroidView(
-                                        factory = { context ->
-                                            PlayerView(context).apply {
+                                        factory = { ctx ->
+                                            PlayerView(ctx).apply {
                                                 player = exoPlayer
                                                 useController = true
                                                 controllerAutoShow = false
@@ -324,18 +331,15 @@ fun MediaExplorer(
                                             translationY = offsetY.value
                                         )
                                         .pointerInput(Unit) {
-                                            // Low-level gesture detection to allow Pager to work at scale 1.0
                                             awaitPointerEventScope {
                                                 while (true) {
                                                     val event = awaitPointerEvent()
                                                     val pointers = event.changes.size
                                                     val currentScale = scale.value
                                                     
-                                                    // Calculate zoom/pan even if we don't use them yet
                                                     val zoom = if (pointers > 1) event.calculateZoom() else 1f
                                                     val pan = event.calculatePan()
 
-                                                    // Decision: Should we consume this event?
                                                     val shouldConsume = currentScale > 1.05f || (pointers > 1 && zoom != 1f)
                                                     
                                                     if (shouldConsume) {
@@ -354,7 +358,6 @@ fun MediaExplorer(
                                                         isImageZoomed = newScale > 1.05f
                                                         if (isImageZoomed) isUiVisible = false
                                                     } else {
-                                                        // We are at scale 1.0 and swiping (or just touching)
                                                         if (event.changes.all { !it.pressed }) {
                                                             if (currentScale < 1f || (currentScale < 1.1f && currentScale > 1f)) {
                                                                 scope.launch {
@@ -428,7 +431,9 @@ fun MediaExplorer(
                         Icon(TablerIcons.ArrowLeft, null, tint = Color.White)
                     }
                     
-                    val currentMessage = items[pagerState.currentPage]
+                    val currentMessage = if (items.itemCount > 0 && pagerState.currentPage in 0 until items.itemCount) {
+                        items[pagerState.currentPage]
+                    } else null
                     if (currentMessage != null) {
                         Text(currentMessage.formattedSearchDate, color = Color.White, fontWeight = FontWeight.Bold)
                     }
@@ -464,7 +469,7 @@ fun MediaExplorer(
                                                 key,
                                                 "Stranger_Image_${currentMessage.id}.jpg"
                                             )
-                                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            withContext(Dispatchers.Main) {
                                                 Toast.makeText(
                                                     context,
                                                     if (success) "Saved to Gallery" else "Failed to save",
@@ -502,7 +507,7 @@ fun MediaExplorer(
                         .height(80.dp)
                         .background(Color.Black.copy(alpha = 0.5f))
                 ) {
-                    androidx.compose.foundation.lazy.LazyRow(
+                    LazyRow(
                         state = thumbnailListState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 8.dp),
@@ -510,7 +515,7 @@ fun MediaExplorer(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         items(items.itemCount) { index ->
-                            val msg = items[index]
+                            val msg = if (index in 0 until items.itemCount) items.peek(index) ?: items[index] else null
                             val key = msg?.parsedContent?.photo ?: msg?.parsedContent?.thumbnail
                             Box(
                                 modifier = Modifier

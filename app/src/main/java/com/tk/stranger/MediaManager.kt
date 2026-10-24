@@ -11,23 +11,24 @@ import aws.sdk.kotlin.services.s3.S3Client
 import aws.sdk.kotlin.services.s3.model.GetObjectRequest
 import aws.smithy.kotlin.runtime.content.toInputStream
 import aws.smithy.kotlin.runtime.net.url.Url
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class MediaManager(private val context: Context) {
 
     private val mediaDir = File(context.filesDir, "media")
     private val managerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
+    private val activeDownloads = ConcurrentHashMap<String, Deferred<File?>>()
+
     private val client by lazy {
         S3Client {
             region = "auto"
@@ -66,10 +67,10 @@ class MediaManager(private val context: Context) {
     }
 
     suspend fun downloadMedia(r2Key: String, onProgress: (Int) -> Unit = {}): File? = withContext(Dispatchers.IO) {
+        if (r2Key.isBlank()) return@withContext null
         val targetFile = getLocalFile(r2Key)
         if (targetFile.exists() && targetFile.length() > 0) return@withContext targetFile
 
-        // Treatment for root files like avatar.jpg, chat-bg.png vs everything else in messages/
         val cleanKey = r2Key.trimStart('/')
         val rootFiles = listOf("avatar.jpg", "chat-bg.png")
         val finalKey = if (rootFiles.contains(cleanKey) || cleanKey.startsWith("messages/")) {
@@ -77,8 +78,21 @@ class MediaManager(private val context: Context) {
         } else {
             "messages/$cleanKey"
         }
-        
-        val deferred = async {
+
+        // Deduplicate in-flight downloads so multiple composables don't write to the same file
+        val existingDeferred = activeDownloads[finalKey]
+        if (existingDeferred != null) {
+            return@withContext try {
+                existingDeferred.await()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        val deferred = managerScope.async {
+            val tempFile = File(mediaDir, "${targetFile.name}.tmp_${UUID.randomUUID()}")
             try {
                 val getObjectRequest = GetObjectRequest {
                     bucket = SecurityConfig.r2BucketName
@@ -89,9 +103,9 @@ class MediaManager(private val context: Context) {
                 client.getObject(getObjectRequest) { response ->
                     val body = response.body ?: throw Exception("Body is null")
                     val totalBytes = body.contentLength ?: -1L
-                    
+
                     body.toInputStream().use { inputStream ->
-                        FileOutputStream(targetFile).use { output ->
+                        FileOutputStream(tempFile).use { output ->
                             val buffer = ByteArray(8192)
                             var bytesRead: Int
                             var totalRead = 0L
@@ -107,34 +121,50 @@ class MediaManager(private val context: Context) {
                                     }
                                 }
                             }
+                            output.flush()
                         }
                     }
                     success = true
                 }
-                
-                if (success && targetFile.exists() && targetFile.length() > 0) {
-                    targetFile
+
+                if (success && tempFile.exists() && tempFile.length() > 0) {
+                    if (targetFile.exists()) targetFile.delete()
+                    if (tempFile.renameTo(targetFile)) {
+                        targetFile
+                    } else if (tempFile.exists()) {
+                        tempFile.copyTo(targetFile, overwrite = true)
+                        tempFile.delete()
+                        targetFile
+                    } else {
+                        null
+                    }
                 } else {
+                    if (tempFile.exists()) tempFile.delete()
                     null
                 }
+            } catch (e: CancellationException) {
+                if (tempFile.exists()) tempFile.delete()
+                throw e
             } catch (e: Exception) {
-                // Clean up on failure
-                if (targetFile.exists()) targetFile.delete()
+                android.util.Log.e("MediaManager", "Download failed for key: $finalKey", e)
+                if (tempFile.exists()) tempFile.delete()
                 null
+            } finally {
+                activeDownloads.remove(finalKey)
             }
         }
 
+        activeDownloads[finalKey] = deferred
+
         try {
             deferred.await()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            // Move cleanup to background IO scope to avoid NetworkOnMainThreadException
-            managerScope.launch {
-                deferred.cancelAndJoin()
-            }
+        } catch (e: CancellationException) {
             throw e
+        } catch (e: Exception) {
+            null
         }
     }
-    
+
     suspend fun saveToDownloads(r2Key: String, originalName: String? = null): Boolean = withContext(Dispatchers.IO) {
         val localFile = getLocalFile(r2Key)
         if (!localFile.exists()) {
@@ -144,7 +174,7 @@ class MediaManager(private val context: Context) {
 
         val mimeType = getMimeType(r2Key)
         val fileName = originalName ?: r2Key.substringAfterLast("/")
-        
+
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val collection = when {
@@ -169,7 +199,7 @@ class MediaManager(private val context: Context) {
 
                 val contentResolver = context.contentResolver
                 val uri = contentResolver.insert(collection, contentValues)
-                
+
                 uri?.let {
                     contentResolver.openOutputStream(it).use { output ->
                         localFile.inputStream().use { input ->
@@ -187,7 +217,7 @@ class MediaManager(private val context: Context) {
                 }
                 val appDir = File(targetDir, "Stranger")
                 if (!appDir.exists()) appDir.mkdirs()
-                
+
                 val targetFile = File(appDir, fileName)
                 localFile.inputStream().use { input ->
                     targetFile.outputStream().use { output ->
@@ -217,7 +247,7 @@ class MediaManager(private val context: Context) {
             else -> "application/octet-stream"
         }
     }
-    
+
     fun close() {
         try {
             client.close()

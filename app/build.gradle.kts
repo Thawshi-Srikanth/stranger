@@ -16,7 +16,7 @@ android {
         }
     }
 
-    val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 1
+    val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 11
     val propVersionName = (project.findProperty("versionName") as? String) ?: "1.0.$propVersionCode"
 
     defaultConfig {

@@ -45,6 +45,29 @@ class DatabaseManager(private val context: Context) {
         private const val DB_ENC_R2_KEY = "messages/chat.db.gz.enc"
     }
 
+    private var sqliteDb: SQLiteDatabase? = null
+    private val dbLock = Any()
+
+    private fun getDb(): SQLiteDatabase? {
+        val dbFile = context.getDatabasePath(DB_NAME)
+        if (!dbFile.exists()) return null
+        synchronized(dbLock) {
+            if (sqliteDb == null || !sqliteDb!!.isOpen) {
+                try {
+                    sqliteDb = SQLiteDatabase.openDatabase(
+                        dbFile.absolutePath,
+                        null,
+                        SQLiteDatabase.OPEN_READONLY
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.e("DatabaseManager", "Failed to open SQLite database", e)
+                    return null
+                }
+            }
+            return sqliteDb
+        }
+    }
+
     fun isDatabaseReady(): Boolean {
         return context.getDatabasePath(DB_NAME).exists()
     }
@@ -139,6 +162,15 @@ class DatabaseManager(private val context: Context) {
     }
 
     private suspend fun decryptAndExtractDatabase(encFile: File, dbFile: File) {
+        synchronized(dbLock) {
+            try {
+                sqliteDb?.close()
+            } catch (e: Exception) {
+                // Ignore close error
+            }
+            sqliteDb = null
+        }
+
         dbFile.parentFile?.let {
             if (!it.exists()) {
                 it.mkdirs()
@@ -157,15 +189,13 @@ class DatabaseManager(private val context: Context) {
     }
 
     suspend fun getMessages(limit: Int = 100, offset: Int = 0): List<ChatMessage> = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return@withContext emptyList()
+        val db = getDb() ?: return@withContext emptyList()
 
         val messages = mutableListOf<ChatMessage>()
         val outgoingId = "user1110791963"
         val incomingId = "user1159974332"
 
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
                 "SELECT m.id, m.message_id, m.date, m.from_id, m.content, m.media_type, m.joined_message, " +
                 "m.reply_to_message_id, p.id as p_id, p.from_id as p_from, p.content as p_content " +
@@ -179,9 +209,9 @@ class DatabaseManager(private val context: Context) {
                 do {
                     val id = cursor.getInt(0)
                     val messageId = cursor.getLong(1)
-                    val date = cursor.getString(2)
-                    val fromId = cursor.getString(3)
-                    val content = cursor.getString(4)
+                    val date = cursor.getString(2) ?: ""
+                    val fromId = cursor.getString(3) ?: ""
+                    val content = cursor.getString(4) ?: ""
                     val mediaType = cursor.getString(5)
                     val joinedId = if (cursor.isNull(6)) null else cursor.getLong(6)
                     val replyToId = if (cursor.isNull(7)) null else cursor.getLong(7)
@@ -208,23 +238,21 @@ class DatabaseManager(private val context: Context) {
                 } while (cursor.moveToNext())
             }
             cursor.close()
-            db.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("DatabaseManager", "getMessages failed", e)
         }
         messages
     }
 
     suspend fun searchMessages(query: String): List<ChatMessage> = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists() || query.isEmpty()) return@withContext emptyList()
+        val db = getDb() ?: return@withContext emptyList()
+        if (query.isEmpty()) return@withContext emptyList()
 
         val results = mutableListOf<ChatMessage>()
         val outgoingId = "user1110791963"
         val incomingId = "user1159974332"
 
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
                 "SELECT id, message_id, date, from_id, content, media_type, joined_message FROM messages " +
                 "WHERE from_id IN (?, ?) AND content LIKE ? ORDER BY id DESC LIMIT 100",
@@ -237,9 +265,9 @@ class DatabaseManager(private val context: Context) {
                         ChatMessage(
                             id = cursor.getInt(0),
                             messageId = cursor.getLong(1),
-                            date = cursor.getString(2),
-                            fromId = cursor.getString(3),
-                            rawContent = cursor.getString(4),
+                            date = cursor.getString(2) ?: "",
+                            fromId = cursor.getString(3) ?: "",
+                            rawContent = cursor.getString(4) ?: "",
                             mediaType = cursor.getString(5),
                             isOutgoing = cursor.getString(3) == outgoingId,
                             joinedMessageId = if (cursor.isNull(6)) null else cursor.getLong(6)
@@ -248,7 +276,6 @@ class DatabaseManager(private val context: Context) {
                 } while (cursor.moveToNext())
             }
             cursor.close()
-            db.close()
         } catch (e: Exception) {
             android.util.Log.e("DatabaseManager", "Search failed", e)
         }
@@ -256,15 +283,13 @@ class DatabaseManager(private val context: Context) {
     }
 
     suspend fun getMessageOffset(targetId: Int): Int = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return@withContext 0
+        val db = getDb() ?: return@withContext 0
 
         val outgoingId = "user1110791963"
         val incomingId = "user1159974332"
         var offset = 0
 
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
                 "SELECT COUNT(*) FROM messages WHERE from_id IN (?, ?) AND id > ?",
                 arrayOf(incomingId, outgoingId, targetId.toString())
@@ -273,20 +298,17 @@ class DatabaseManager(private val context: Context) {
                 offset = cursor.getInt(0)
             }
             cursor.close()
-            db.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("DatabaseManager", "getMessageOffset failed", e)
         }
         offset
     }
 
     suspend fun getDateRange(): Pair<Long, Long> = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return@withContext 0L to 0L
+        val db = getDb() ?: return@withContext 0L to 0L
 
         var range = 0L to 0L
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery("SELECT MIN(date), MAX(date) FROM messages", null)
             if (cursor.moveToFirst()) {
                 val minStr = cursor.getString(0)?.replace("T", " ")?.take(19)
@@ -312,16 +334,14 @@ class DatabaseManager(private val context: Context) {
                 range = minTs to maxTs
             }
             cursor.close()
-            db.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("DatabaseManager", "getDateRange failed", e)
         }
         range
     }
 
     suspend fun getOffsetByDate(timestampMs: Long): Int = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return@withContext 0
+        val db = getDb() ?: return@withContext 0
 
         val outgoingId = "user1110791963"
         val incomingId = "user1159974332"
@@ -333,7 +353,6 @@ class DatabaseManager(private val context: Context) {
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
 
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
                 "SELECT COUNT(*) FROM messages WHERE from_id IN (?, ?) AND date > ?",
                 arrayOf(incomingId, outgoingId, targetDate)
@@ -342,16 +361,14 @@ class DatabaseManager(private val context: Context) {
                 offset = cursor.getInt(0)
             }
             cursor.close()
-            db.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("DatabaseManager", "getOffsetByDate failed", e)
         }
         offset
     }
 
     suspend fun getMediaMessages(type: String, limit: Int, offset: Int): List<ChatMessage> = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return@withContext emptyList()
+        val db = getDb() ?: return@withContext emptyList()
 
         val results = mutableListOf<ChatMessage>()
         val outgoingId = "user1110791963"
@@ -368,7 +385,6 @@ class DatabaseManager(private val context: Context) {
         }
 
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
                 "SELECT id, message_id, date, from_id, content, media_type, joined_message FROM messages " +
                 "WHERE from_id IN (?, ?) AND $typeFilter ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -381,9 +397,9 @@ class DatabaseManager(private val context: Context) {
                         ChatMessage(
                             id = cursor.getInt(0),
                             messageId = cursor.getLong(1),
-                            date = cursor.getString(2),
-                            fromId = cursor.getString(3),
-                            rawContent = cursor.getString(4),
+                            date = cursor.getString(2) ?: "",
+                            fromId = cursor.getString(3) ?: "",
+                            rawContent = cursor.getString(4) ?: "",
                             mediaType = cursor.getString(5),
                             isOutgoing = cursor.getString(3) == outgoingId,
                             joinedMessageId = if (cursor.isNull(6)) null else cursor.getLong(6)
@@ -392,17 +408,15 @@ class DatabaseManager(private val context: Context) {
                 } while (cursor.moveToNext())
             }
             cursor.close()
-            db.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("DatabaseManager", "getMediaMessages failed for $type", e)
         }
         results
     }
 
     suspend fun getMediaMessageIndex(targetId: Int, type: String): Int =
         withContext(Dispatchers.IO) {
-            val dbFile = context.getDatabasePath(DB_NAME)
-            if (!dbFile.exists()) return@withContext 0
+            val db = getDb() ?: return@withContext 0
 
             val outgoingId = "user1110791963"
             val incomingId = "user1159974332"
@@ -417,11 +431,6 @@ class DatabaseManager(private val context: Context) {
             }
 
             try {
-                val db = SQLiteDatabase.openDatabase(
-                    dbFile.absolutePath,
-                    null,
-                    SQLiteDatabase.OPEN_READONLY
-                )
                 val cursor = db.rawQuery(
                     "SELECT COUNT(*) FROM messages WHERE from_id IN (?, ?) AND $typeFilter AND id > ?",
                     arrayOf(incomingId, outgoingId, targetId.toString())
@@ -430,16 +439,14 @@ class DatabaseManager(private val context: Context) {
                     index = cursor.getInt(0)
                 }
                 cursor.close()
-                db.close()
             } catch (e: Exception) {
-                e.printStackTrace()
+                android.util.Log.e("DatabaseManager", "getMediaMessageIndex failed", e)
             }
             index
         }
 
     suspend fun getMediaCount(type: String): Int = withContext(Dispatchers.IO) {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return@withContext 0
+        val db = getDb() ?: return@withContext 0
         var count = 0
         val outgoingId = "user1110791963"
         val incomingId = "user1159974332"
@@ -453,13 +460,24 @@ class DatabaseManager(private val context: Context) {
             else -> "media_type IS NOT NULL"
         }
         try {
-            val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery("SELECT COUNT(*) FROM messages WHERE from_id IN (?, ?) AND $typeFilter", arrayOf(incomingId, outgoingId))
             if (cursor.moveToFirst()) count = cursor.getInt(0)
             cursor.close()
-            db.close()
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("DatabaseManager", "getMediaCount failed for $type", e)
+        }
         count
+    }
+
+    fun close() {
+        synchronized(dbLock) {
+            try {
+                sqliteDb?.close()
+            } catch (e: Exception) {
+                // Ignore close error
+            }
+            sqliteDb = null
+        }
     }
 
     inner class MessagePagingSource : PagingSource<Int, ChatMessage>() {
@@ -502,8 +520,8 @@ class DatabaseManager(private val context: Context) {
                 LoadResult.Page(
                     data = media,
                     prevKey = if (offset == 0) null else (offset - limit).coerceAtLeast(0),
-                    nextKey = if (media.isEmpty()) null else offset + media.size,
-                    itemsBefore = offset,
+                    nextKey = if (media.isEmpty() || offset + media.size >= totalCount) null else offset + media.size,
+                    itemsBefore = offset.coerceAtLeast(0),
                     itemsAfter = (totalCount - (offset + media.size)).coerceAtLeast(0)
                 )
             } catch (e: Exception) {

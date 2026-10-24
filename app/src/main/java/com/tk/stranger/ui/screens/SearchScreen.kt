@@ -1,5 +1,6 @@
 package com.tk.stranger.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -37,6 +38,10 @@ fun SearchScreen(
     dbManager: DatabaseManager,
     onDateSelected: (Long) -> Unit
 ) {
+    BackHandler {
+        onClose()
+    }
+
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 

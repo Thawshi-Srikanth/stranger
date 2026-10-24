@@ -306,7 +306,7 @@ fun ChatScreen(
                             Spacer(Modifier.width(12.dp))
                             Column(verticalArrangement = Arrangement.Center) {
                                 Text(
-                                    "Stranger",
+                                    "Pakki",
                                     fontSize = 16.sp,
                                     color = Color.White,
                                     fontWeight = FontWeight.Bold,

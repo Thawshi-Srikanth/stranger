@@ -1,6 +1,7 @@
 package com.tk.stranger.ui.screens
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -77,6 +78,10 @@ fun ProfileScreen(
     onChangePasscode: () -> Unit,
     exoPlayer: Player
 ) {
+    BackHandler {
+        onClose()
+    }
+
     val selectedTabState = remember { mutableStateOf("Media") }
     var selectedTab by selectedTabState
     val tabs = listOf("Media", "Files", "Music", "Voice", "Location", "Contact")
@@ -177,7 +182,7 @@ fun ProfileScreen(
                         }
                         Spacer(Modifier.height(16.dp))
                         Text(
-                            "Stranger",
+                            "Pakki",
                             fontSize = 24.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -320,18 +325,19 @@ fun ProfileScreen(
                                                 onDownload = {
                                                     scope.launch {
                                                         val key = message.parsedContent.file ?: message.parsedContent.photo ?: ""
-                                                        // Ensure downloaded first
-                                                        val file = mediaManager.downloadMedia(key)
-                                                        if (file != null) {
-                                                            val success = mediaManager.saveToDownloads(
-                                                                key,
-                                                                message.parsedContent.title ?: "Stranger_Media_${message.id}"
-                                                            )
-                                                            snackbarHostState.showSnackbar(
-                                                                if (success) "Saved to Gallery" else "Failed to save"
-                                                            )
-                                                        } else {
-                                                            snackbarHostState.showSnackbar("Failed to download media")
+                                                        if (key.isNotEmpty()) {
+                                                            val file = mediaManager.downloadMedia(key)
+                                                            if (file != null) {
+                                                                val success = mediaManager.saveToDownloads(
+                                                                    key,
+                                                                    message.parsedContent.title ?: "Stranger_Media_${message.id}"
+                                                                )
+                                                                snackbarHostState.showSnackbar(
+                                                                    if (success) "Saved to Gallery" else "Failed to save"
+                                                                )
+                                                            } else {
+                                                                snackbarHostState.showSnackbar("Failed to download media")
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -399,23 +405,24 @@ fun ProfileScreen(
                                     onDismiss = { showMenu = false },
                                     onShowInChat = { onJumpToMessage(message.id) },
                                     onDownload = {
-                                    scope.launch {
-                                        val key = message.parsedContent.file ?: message.parsedContent.photo ?: ""
-                                        // Ensure downloaded first
-                                        val file = mediaManager.downloadMedia(key)
-                                        if (file != null) {
-                                            val success = mediaManager.saveToDownloads(
-                                                key,
-                                                message.parsedContent.title
-                                            )
-                                            snackbarHostState.showSnackbar(
-                                                if (success) "Saved to Downloads" else "Failed to save"
-                                            )
-                                        } else {
-                                            snackbarHostState.showSnackbar("Failed to download media")
+                                        scope.launch {
+                                            val key = message.parsedContent.file ?: message.parsedContent.photo ?: ""
+                                            if (key.isNotEmpty()) {
+                                                val file = mediaManager.downloadMedia(key)
+                                                if (file != null) {
+                                                    val success = mediaManager.saveToDownloads(
+                                                        key,
+                                                        message.parsedContent.title
+                                                    )
+                                                    snackbarHostState.showSnackbar(
+                                                        if (success) "Saved to Downloads" else "Failed to save"
+                                                    )
+                                                } else {
+                                                    snackbarHostState.showSnackbar("Failed to download media")
+                                                }
+                                            }
                                         }
                                     }
-                                }
                                 )
                             }
                         }
@@ -439,31 +446,35 @@ fun ProfileScreen(
             // Floating Date Indicator (Scroll Bar)
             val firstVisibleItemDate by remember {
                 derivedStateOf {
-                    val layoutInfo = listState.layoutInfo
-                    val visibleItems = layoutInfo.visibleItemsInfo
-                    if (visibleItems.isEmpty()) return@derivedStateOf ""
+                    try {
+                        val layoutInfo = listState.layoutInfo
+                        val visibleItems = layoutInfo.visibleItemsInfo
+                        if (visibleItems.isEmpty()) return@derivedStateOf ""
 
-                    // Target the item closest to the vertical center of the viewport
-                    val viewportCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2
-                    val centerItem = visibleItems.minByOrNull { 
-                        val itemCenter = it.offset + it.size / 2
-                        kotlin.math.abs(itemCenter - viewportCenter) 
-                    } ?: visibleItems.first()
+                        // Target the item closest to the vertical center of the viewport
+                        val viewportCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2
+                        val centerItem = visibleItems.minByOrNull { 
+                            val itemCenter = it.offset + it.size / 2
+                            kotlin.math.abs(itemCenter - viewportCenter) 
+                        } ?: visibleItems.first()
 
-                    if (centerItem.index >= 3 && currentMediaItems.itemCount > 0) {
-                        val contentIndex = centerItem.index - 3
-                        // For Media tab, index is row-based (3 columns), so we adjust
-                        val actualMediaIndex = if (selectedTab == "Media") {
-                            contentIndex * 3
-                        } else {
-                            contentIndex
-                        }
-                        
-                        if (actualMediaIndex in 0 until currentMediaItems.itemCount) {
-                            // Use peek to avoid triggering data loads/lag during scroll
-                            currentMediaItems.peek(actualMediaIndex)?.formattedSearchDate ?: ""
+                        if (centerItem.index >= 3 && currentMediaItems.itemCount > 0) {
+                            val contentIndex = centerItem.index - 3
+                            // For Media tab, index is row-based (3 columns), so we adjust
+                            val actualMediaIndex = if (selectedTab == "Media") {
+                                contentIndex * 3
+                            } else {
+                                contentIndex
+                            }
+                            
+                            val snapshot = currentMediaItems.itemSnapshotList
+                            if (actualMediaIndex in 0 until snapshot.size) {
+                                snapshot[actualMediaIndex]?.formattedSearchDate ?: ""
+                            } else ""
                         } else ""
-                    } else ""
+                    } catch (e: Exception) {
+                        ""
+                    }
                 }
             }
 
@@ -507,7 +518,12 @@ fun ProfileScreen(
                     ProfileTabs(
                         tabs = tabs,
                         selectedTab = selectedTab,
-                        onTabSelected = { selectedTab = it }
+                        onTabSelected = { 
+                            selectedTab = it 
+                            scope.launch {
+                                listState.scrollToItem(0)
+                            }
+                        }
                     )
                 }
                 
@@ -689,7 +705,6 @@ fun ProfileActionButton(
     }
 }
 
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ProfileMediaItem(
@@ -699,7 +714,7 @@ fun ProfileMediaItem(
     onLongClick: () -> Unit
 ) {
     val key =
-        message.parsedContent.photo ?: message.parsedContent.thumbnail ?: message.parsedContent.file
+        message.parsedContent.thumbnail ?: message.parsedContent.photo ?: message.parsedContent.file
     var localFile by remember {
         mutableStateOf(
             if (key != null && mediaManager.isFileDownloaded(key)) mediaManager.getLocalFile(
@@ -751,7 +766,9 @@ fun ProfileMediaItem(
                         strokeWidth = 2.dp
                     )
                     LaunchedEffect(key) {
-                        localFile = mediaManager.downloadMedia(key!!) { downloadProgress = it }
+                        if (key != null) {
+                            localFile = mediaManager.downloadMedia(key) { downloadProgress = it }
+                        }
                         isDownloading = false
                     }
                 } else {
@@ -892,7 +909,9 @@ fun ProfileFileItem(
                         strokeWidth = 2.dp
                     )
                     LaunchedEffect(key) {
-                        localFile = mediaManager.downloadMedia(key!!) { downloadProgress = it }
+                        if (key != null) {
+                            localFile = mediaManager.downloadMedia(key) { downloadProgress = it }
+                        }
                         isDownloading = false
                     }
                 } else {
