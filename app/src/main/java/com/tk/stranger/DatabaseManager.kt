@@ -48,37 +48,103 @@ class DatabaseManager(private val context: Context) {
     private var sqliteDb: SQLiteDatabase? = null
     private val dbLock = Any()
 
+    fun isDatabaseReady(): Boolean {
+        val dbFile = context.getDatabasePath(DB_NAME)
+        return isDatabaseValid(dbFile)
+    }
+
+    private fun isDatabaseValid(dbFile: File): Boolean {
+        if (!dbFile.exists() || dbFile.length() < 1024L) return false
+        return try {
+            val testDb = SQLiteDatabase.openDatabase(
+                dbFile.absolutePath,
+                null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS
+            )
+            val cursor = testDb.rawQuery("SELECT COUNT(*) FROM messages", null)
+            val valid = cursor.moveToFirst()
+            cursor.close()
+            testDb.close()
+            valid
+        } catch (e: Exception) {
+            try {
+                val testDb = SQLiteDatabase.openDatabase(
+                    dbFile.absolutePath,
+                    null,
+                    SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS
+                )
+                val cursor = testDb.rawQuery("SELECT COUNT(*) FROM messages", null)
+                val valid = cursor.moveToFirst()
+                cursor.close()
+                testDb.close()
+                valid
+            } catch (e2: Exception) {
+                false
+            }
+        }
+    }
+
+    private fun ensureIndices(db: SQLiteDatabase) {
+        try {
+            if (!db.isReadOnly) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_from_id ON messages(from_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_media_type ON messages(media_type)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date)")
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("DatabaseManager", "Failed to ensure indices", e)
+        }
+    }
+
     private fun getDb(): SQLiteDatabase? {
         val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return null
+        if (!dbFile.exists() || dbFile.length() < 1024L) return null
         synchronized(dbLock) {
             if (sqliteDb == null || !sqliteDb!!.isOpen) {
                 try {
                     sqliteDb = SQLiteDatabase.openDatabase(
                         dbFile.absolutePath,
                         null,
-                        SQLiteDatabase.OPEN_READONLY
+                        SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS
                     )
+                    ensureIndices(sqliteDb!!)
                 } catch (e: Exception) {
-                    android.util.Log.e("DatabaseManager", "Failed to open SQLite database", e)
-                    return null
+                    android.util.Log.w("DatabaseManager", "Failed to open SQLite database read-write; trying read-only", e)
+                    try {
+                        sqliteDb = SQLiteDatabase.openDatabase(
+                            dbFile.absolutePath,
+                            null,
+                            SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS
+                        )
+                    } catch (e2: Exception) {
+                        android.util.Log.e("DatabaseManager", "Failed to open SQLite database read-only", e2)
+                        return null
+                    }
                 }
             }
             return sqliteDb
         }
     }
 
-    fun isDatabaseReady(): Boolean {
-        return context.getDatabasePath(DB_NAME).exists()
-    }
-
     suspend fun setupDatabase() {
         withContext(Dispatchers.IO) {
             val dbFile = context.getDatabasePath(DB_NAME)
             
-            if (dbFile.exists()) {
+            if (isDatabaseValid(dbFile)) {
                 _setupState.value = SetupState.Completed
                 return@withContext
+            }
+
+            // If an invalid or corrupted file exists (e.g. after OS upgrade), clean it up
+            if (dbFile.exists()) {
+                close()
+                dbFile.delete()
+                File("${dbFile.absolutePath}-wal").delete()
+                File("${dbFile.absolutePath}-shm").delete()
+                File("${dbFile.absolutePath}-journal").delete()
             }
 
             val encFile = File(context.cacheDir, DB_ENC_NAME)
@@ -87,6 +153,9 @@ class DatabaseManager(private val context: Context) {
                 downloadDatabase(encFile)
                 _setupState.value = SetupState.Extracting
                 decryptAndExtractDatabase(encFile, dbFile)
+                if (!isDatabaseValid(dbFile)) {
+                    throw IllegalStateException("Extracted database is invalid or corrupt")
+                }
                 _setupState.value = SetupState.Completed
             } catch (e: Exception) {
                 _setupState.value = SetupState.Error(e.message ?: "Unknown error")
@@ -185,25 +254,48 @@ class DatabaseManager(private val context: Context) {
                 gzipIn.copyTo(fileOut)
             }
         }
+        try {
+            val db = SQLiteDatabase.openDatabase(
+                dbFile.absolutePath,
+                null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS
+            )
+            ensureIndices(db)
+            db.close()
+        } catch (e: Exception) {
+            android.util.Log.w("DatabaseManager", "Initial indexing after extract failed", e)
+        }
         delay(500) // Pause before finishing
     }
 
     suspend fun getMessages(limit: Int = 100, offset: Int = 0): List<ChatMessage> = withContext(Dispatchers.IO) {
-        val db = getDb() ?: return@withContext emptyList()
+        val db = getDb() ?: throw IllegalStateException("Database not available")
 
         val messages = mutableListOf<ChatMessage>()
         val outgoingId = "user1110791963"
         val incomingId = "user1159974332"
 
         try {
+            // First fetch the requested page of messages directly without a heavy full-table self-join
             val cursor = db.rawQuery(
-                "SELECT m.id, m.message_id, m.date, m.from_id, m.content, m.media_type, m.joined_message, " +
-                "m.reply_to_message_id, p.id as p_id, p.from_id as p_from, p.content as p_content " +
-                "FROM messages m " +
-                "LEFT JOIN messages p ON m.reply_to_message_id = p.message_id " +
-                "WHERE m.from_id IN (?, ?) ORDER BY m.id DESC LIMIT ? OFFSET ?",
+                "SELECT id, message_id, date, from_id, content, media_type, joined_message, reply_to_message_id " +
+                "FROM messages " +
+                "WHERE from_id IN (?, ?) ORDER BY id DESC LIMIT ? OFFSET ?",
                 arrayOf(incomingId, outgoingId, limit.toString(), offset.toString())
             )
+
+            data class RawMsg(
+                val id: Int,
+                val messageId: Long,
+                val date: String,
+                val fromId: String,
+                val content: String,
+                val mediaType: String?,
+                val joinedId: Long?,
+                val replyToId: Long?
+            )
+            val rawList = mutableListOf<RawMsg>()
+            val replyIdsToFetch = mutableSetOf<Long>()
 
             if (cursor.moveToFirst()) {
                 do {
@@ -215,31 +307,62 @@ class DatabaseManager(private val context: Context) {
                     val mediaType = cursor.getString(5)
                     val joinedId = if (cursor.isNull(6)) null else cursor.getLong(6)
                     val replyToId = if (cursor.isNull(7)) null else cursor.getLong(7)
-                    val pLocalId = if (cursor.isNull(8)) null else cursor.getInt(8)
-                    val pFromId = cursor.getString(9)
-                    val pContent = cursor.getString(10)
-                    
-                    messages.add(
-                        ChatMessage(
-                            id = id,
-                            messageId = messageId,
-                            date = date,
-                            fromId = fromId,
-                            rawContent = content,
-                            mediaType = mediaType,
-                            isOutgoing = fromId == outgoingId,
-                            joinedMessageId = joinedId,
-                            replyToMessageId = replyToId,
-                            parentLocalId = pLocalId,
-                            parentFromId = pFromId,
-                            parentRawContent = pContent
-                        )
-                    )
+
+                    rawList.add(RawMsg(id, messageId, date, fromId, content, mediaType, joinedId, replyToId))
+                    if (replyToId != null && replyToId > 0) {
+                        replyIdsToFetch.add(replyToId)
+                    }
                 } while (cursor.moveToNext())
             }
             cursor.close()
+
+            // Fetch only the parent messages referenced by this page
+            data class ParentInfo(val id: Int, val fromId: String?, val content: String?)
+            val parentMap = mutableMapOf<Long, ParentInfo>()
+
+            if (replyIdsToFetch.isNotEmpty()) {
+                val chunks = replyIdsToFetch.chunked(500)
+                for (chunk in chunks) {
+                    val placeholders = chunk.joinToString(",") { "?" }
+                    val pCursor = db.rawQuery(
+                        "SELECT id, message_id, from_id, content FROM messages WHERE message_id IN ($placeholders)",
+                        chunk.map { it.toString() }.toTypedArray()
+                    )
+                    if (pCursor.moveToFirst()) {
+                        do {
+                            val pId = pCursor.getInt(0)
+                            val pMsgId = pCursor.getLong(1)
+                            val pFrom = pCursor.getString(2)
+                            val pContent = pCursor.getString(3)
+                            parentMap[pMsgId] = ParentInfo(pId, pFrom, pContent)
+                        } while (pCursor.moveToNext())
+                    }
+                    pCursor.close()
+                }
+            }
+
+            for (m in rawList) {
+                val parent = m.replyToId?.let { parentMap[it] }
+                messages.add(
+                    ChatMessage(
+                        id = m.id,
+                        messageId = m.messageId,
+                        date = m.date,
+                        fromId = m.fromId,
+                        rawContent = m.content,
+                        mediaType = m.mediaType,
+                        isOutgoing = m.fromId == outgoingId,
+                        joinedMessageId = m.joinedId,
+                        replyToMessageId = m.replyToId,
+                        parentLocalId = parent?.id,
+                        parentFromId = parent?.fromId,
+                        parentRawContent = parent?.content
+                    )
+                )
+            }
         } catch (e: Exception) {
             android.util.Log.e("DatabaseManager", "getMessages failed", e)
+            throw e
         }
         messages
     }
@@ -503,6 +626,7 @@ class DatabaseManager(private val context: Context) {
                     nextKey = nextKey
                 )
             } catch (e: Exception) {
+                android.util.Log.e("DatabaseManager", "MessagePagingSource.load failed", e)
                 LoadResult.Error(e)
             }
         }
@@ -525,6 +649,7 @@ class DatabaseManager(private val context: Context) {
                     itemsAfter = (totalCount - (offset + media.size)).coerceAtLeast(0)
                 )
             } catch (e: Exception) {
+                android.util.Log.e("DatabaseManager", "MediaPagingSource.load failed for $type", e)
                 LoadResult.Error(e)
             }
         }

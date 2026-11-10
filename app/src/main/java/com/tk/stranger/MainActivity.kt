@@ -18,13 +18,16 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import androidx.paging.cachedIn
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.insertSeparators
 import androidx.paging.map
@@ -37,6 +40,12 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var player: Player? by mutableStateOf(null)
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+
+    override fun onDestroy() {
+        super.onDestroy()
+        controllerFuture?.let { MediaController.releaseFuture(it) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
@@ -62,9 +71,14 @@ class MainActivity : ComponentActivity() {
         }
 
         val sessionToken = SessionToken(this, ComponentName(this, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
-        controllerFuture.addListener({
-            player = controllerFuture.get()
+        val future = MediaController.Builder(this, sessionToken).buildAsync()
+        controllerFuture = future
+        future.addListener({
+            try {
+                player = future.get()
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Failed to obtain MediaController", e)
+            }
         }, MoreExecutors.directExecutor())
         
         setContent {
@@ -117,14 +131,14 @@ class MainActivity : ComponentActivity() {
             val listState = rememberLazyListState()
             val scope = rememberCoroutineScope()
 
-            val mediaPagingFlow = remember {
+            val mediaPagingFlow = remember(setupState) {
                 Pager(PagingConfig(pageSize = 60)) {
                     dbManager.MediaPagingSource("Media")
-                }.flow
+                }.flow.cachedIn(lifecycleScope)
             }
             val mediaItems = mediaPagingFlow.collectAsLazyPagingItems()
 
-            val pagingFlow: Flow<PagingData<ChatListItem>> = remember(initialOffset) {
+            val pagingFlow: Flow<PagingData<ChatListItem>> = remember(initialOffset, setupState) {
                 Pager(
                     config = PagingConfig(
                         pageSize = 30,
@@ -147,7 +161,7 @@ class MainActivity : ComponentActivity() {
                                 null
                             }
                         }
-                }
+                }.cachedIn(lifecycleScope)
             }
             
             fun jumpToMessage(id: Int, forceReload: Boolean = true) {

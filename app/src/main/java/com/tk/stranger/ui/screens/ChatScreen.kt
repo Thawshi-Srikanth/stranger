@@ -258,6 +258,36 @@ fun ChatScreen(
                         }
                     }
                 }
+
+                val refreshState = lazyPagingItems.loadState.refresh
+                if (refreshState is androidx.paging.LoadState.Loading && lazyPagingItems.itemCount == 0) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
+                } else if (refreshState is androidx.paging.LoadState.Error && lazyPagingItems.itemCount == 0) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Text(
+                                "Failed to load messages",
+                                color = Color.White.copy(alpha = 0.8f),
+                                fontSize = 14.sp
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = { lazyPagingItems.retry() }) {
+                                Text("Retry")
+                            }
+                        }
+                    }
+                }
             }
 
             // Frosted Glass Top Bar + MiniPlayer
